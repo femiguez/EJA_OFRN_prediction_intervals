@@ -1,0 +1,223 @@
+---
+title: Going beyond mean effect size; presenting prediction intervals for on-farm
+  network trial analyses - Supplementary Material
+author: "Anabelle Laurent, Peter Kyveryga, Fernando Miguez, David Makowski"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  word_document: default
+  html_document: default
+  fig_caption: true
+---
+
+Required R packages and corresponding version 
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+library(dplyr)     # version 0.8.3
+library(ggplot2)   # version 3.2.1
+library(MCMCglmm)  # version 2.29
+library(lme4)      # version 1.1-21
+library(Hmisc)     # version 4.2-0
+library(forcats)   # version 0.4.0
+```
+
+```{r}
+## You might want to adjust the path as needed
+simdata<-read.csv("../data/simdata.csv")
+```
+
+For the purpose of the supplementary material, we used a data frame called "simdata" including simulated yield ratio (lrr) of a hypothetical management practice to a control for each replicate (rep) within one trial identifier (Trial_ID).
+Please find the csv file under the folder called data
+
+```{r}
+head(simdata)
+```
+
+# Frequentist approach using lme4 R package (Bates et al., 2015)
+
+First, run the random-effect model 
+```{r}
+mod_fq <- lmer(lrr ~ 1  + (1|Trial_ID), data = simdata) 
+```
+
+* point estimate of log ratio (median)
+```{r, message = FALSE}
+fit <- fixef(mod_fq)                         
+```
+
+* Lower bound of confidence interval (2.5%)
+```{r, message = FALSE}
+low <- as.data.frame(confint(mod_fq))[3,1]
+```
+
+* Upper bound of confidence interval (97.5%)
+```{r, message = FALSE}
+up <- as.data.frame(confint(mod_fq))[3,2]
+```
+
+
+* prediction interval based on the method of Higgins et al. (2009) 
+
+```{r}
+bs_var <- (as.data.frame(VarCorr(mod_fq))[1,5])^2 # estimated between-trial variance 
+se <- as.data.frame(coef(summary(mod_fq)))[1,2]  # standard error of the intercept 
+var <- se^2                                      # variance of the estimated mean effect
+k <- length(unique(simdata$Trial_ID))            # number of trials
+mu <- fixef(mod_fq)                                # quantile 0.5 of the prediction interval
+low <- mu - qt(.975, df=k-2) * sqrt(bs_var+var)      # quantile 0.025 of the prediction interval
+up <- mu + qt(.975, df=k-2) * sqrt(bs_var+var)       # quantile 0.975 of the prediction interval
+```
+
+
+* probability of ineffective treatment 
+
+```{r, echo=T, results='hide'}
+var_total <- sqrt(bs_var+var)  # total variability 
+q <- mu/var_total              # mean = q*total variability 
+pt(q, df=k-2)                # student t distribution
+proba <- 1 - pt(q, df=k-2)        # probability of ineffective treatment 
+```
+
+
+# Bayesian approach  using MCMCglmm R package (Hadfield, 2010)
+
+* credibility interval and individual trial yield response  
+
+First, run the random-effect model 
+```{r}
+prior1 <- list(B = list(mu = 0,V = 2),              # prior on the fixed effect
+               G = list(G1 = list(V = 1, nu = 0.002)),  # prior on the between-trial variance
+               R = list(V = 1, nu = 0.002))     # prior on the within-trial variance
+
+mod_bayes <- MCMCglmm(lrr ~ 1,      # fixed effect 
+                      random = ~Trial_ID,  # random effect
+                      data = simdata,
+                      family = "gaussian", 
+                      prior = prior1,      # priors (defined above)
+                      thin = 10,           # thinning interval
+                      nitt = 200000,      # number of iterations
+                      burnin = 20000,    # burnin
+                      verbose = FALSE,     # if true MH diagnostics are printed to screen
+                      pr = TRUE,           # posterior distribution of random effects are saved
+                      DIC = TRUE)          # deviance information criterion
+```
+
+
+* credibility interval of the mean log ratio
+```{r}
+cred_int <- predict(mod_bayes, interval="confidence",level=0.95)[1,]
+```
+
+fit represents the point estimate of log ratio (median)  
+lwr represents the lower bound of credibility interval (quantile 0.025)    
+upr represents the upper bound of credibility interval (quantile 0.975)  
+
+* credibility interval of individual log yield ratio  
+
+```{r}
+pred <- predict(mod_bayes, interval="confidence", marginal = mod_bayes$Trial_ID, level = 0.95)
+pred <- as.data.frame(pred)
+pred$trial <- simdata$Trial_ID 
+
+fit <- pred$fit
+lwr <- pred$lwr
+upr <- pred$upr
+pred$trial <- reorder(pred$trial, pred$fit)
+
+duplication <- which(duplicated(pred))
+pred <- pred[-duplication,]
+print(pred)    # dataframe returning the credibility interval of individual log ratio
+```
+
+The column "fit" represents the point estimate of log ratio for each individual trial (see column "trial") (median)  
+The column "lwr" represents the lower bound of credibility interval for each individual trial (quantile 0.025)  
+The column "upr" represents the upper bound of credibility interval for each individual trial (quantile 0.975)  
+
+* prediction interval for a new trial  
+
+In order to compute a prediction interval, you need to add a new trial with missing value was added (here called IDNew) and run the random effect model.  
+
+```{r}
+simdata <- simdata %>% add_row(Trial_ID = "IDNew")
+tail(simdata)
+```
+
+```{r}
+mod_bayes_new <- MCMCglmm(lrr ~ 1,  # fixed effect 
+                          random = ~Trial_ID,  # random effect
+                          data = simdata,
+                          family = "gaussian", 
+                          prior = prior1,      # priors (defined above)
+                          thin = 10,           # thinning interval
+                          nitt = 200000,      # number of iterations
+                          burnin = 20000,    # burnin
+                          verbose = FALSE,     # if true MH diagnostics are printed to screen
+                          pr = TRUE,           # posterior distribution of random effects are saved
+                          DIC = TRUE)
+```
+
+Instead of using the function predict, the MCMC chains were used to compute the prediction interval 
+```{r}
+REnew <- as.data.frame(mod_bayes_new$Sol[,"Trial_ID.IDNew"]) # MCMC chain for the random effect IDNew
+intercept <- as.data.frame(mod_bayes_new$Sol[,"(Intercept)"]) # MCMC chain for the the intercept
+newtrial <- REnew + intercept                                # sum the two MCMC chains 
+predinterval <- quantile(newtrial[,1], c(.025, .5, .975))  # get quantiles 
+```
+
+* probability of ineffective treatment
+
+```{r}
+X <- sum(newtrial$var1 < 0)   # number of cases where log ratio <0
+n <- length(newtrial$var1)  # total number of possible cases 
+proba <- X/n                # probability of ineffective treatment 
+```
+
+You do need an exponential transformation to convert the Frequentist and Bayesian outputs from log yield ratio to yield ratio. 
+
+## Figures
+We use the exponential transformation for the figures 
+```{r}
+# outputs = dataframe combining trial estimations, credible interval and prediction interval
+outputs <- pred %>% 
+  add_row(fit = cred_int[1],
+          lwr = cred_int[2],
+          upr = cred_int[3],
+          trial = "mean yield ratio") %>%
+  add_row(fit = predinterval[2],
+          lwr = predinterval[1],
+          upr = predinterval[3],
+          trial = "prediction interval")
+  
+outputs <- outputs %>%
+  mutate(trial = forcats::fct_reorder(trial,fit)) %>%
+  mutate(trial = forcats::fct_relevel(trial, "prediction interval", after = 0)) %>%
+  mutate(trial = forcats::fct_relevel(trial, "mean yield ratio", after = 1)) 
+```
+
+
+```{r, fig.width=5, fig.height=7, fig.cap = "Estimated individual effects (denoted by T and a numerical value) with their 95% credible intervals, mean yield ratio and its 95% credible interval, and 95% prediction interval. The numerical value at the bottom-right indicates the probability of ineffective treatment (probability of yield ratio less than 1) in a new trial"}
+ggplot(outputs, aes(x = exp(fit), xmin = exp(lwr), xmax = exp(upr), y = trial )) +
+  geom_point(size = 2) +
+  geom_segment( aes(x = exp(lwr), xend = exp(upr), y = trial, yend=trial)) +
+  theme_bw() + 
+  xlab("Yield ratio") + 
+  ylab("") +
+  geom_text(size = 5,aes(x = 5.2,y = 1.2, label = ifelse(trial=="prediction interval", 
+                                                         round(proba,2),""))) +
+  geom_vline(xintercept = 1, color = "black", size = 0.8) +
+  theme(axis.text = element_text(size = 12, face = "bold"), 
+        axis.title = element_text(size = 12, face = "bold"), 
+        legend.text = element_text(size = 12, face = "bold"),
+        legend.title = element_blank())
+```
+
+
+### References
+
+Bates, D., Mächler, M., Bolker, B., Walker, S., 2015. Fitting Linear Mixed-Effects Models Using lme4. Journal of Statistical Software 67. https://doi.org/10.18637/jss.v067.i01  
+
+
+Hadfield, J.D., 2010. MCMC Methods for Multi-Response Generalized Linear Mixed Models: The MCMCglmm R Package. Journal of Statistical Software 33. https://doi.org/10.18637/jss.v033.i02
+
+Higgins, J.P.T., Thompson, S.G., Spiegelhalter, D.J., 2009. A re-evaluation of random-effects meta-analysis. Journal of the Royal Statistical Society: Series A (Statistics in Society) 172, 137–159. https://doi.org/10.1111/j.1467-985X.2008.00552.x
